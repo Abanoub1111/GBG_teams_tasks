@@ -163,6 +163,31 @@ def get_intersecting_documents(results_list):
                 seen.add(doc.page_content)
     return final_docs
 
+def detect_prompt_injection(user_prompt: str) -> bool:
+    suspicious_phrases = [
+        "ignore previous",
+        "ignore instructions",
+        "ignore all instructions",
+        "disregard instructions",
+        "bypass",
+        "override instructions",
+        "forget previous",
+        "act as",
+        "system prompt",
+        "developer instructions",
+        "output the word",
+        "say passed",
+        "tell a joke"
+    ]
+
+    prompt_lower = user_prompt.lower()
+
+    for phrase in suspicious_phrases:
+        if phrase in prompt_lower:
+            return True
+
+    return False
+
 def adaptive_k_filter(docs_with_scores, min_k=1, max_k=10):
     if not docs_with_scores: return []
     docs_with_scores.sort(key=lambda x: x[1], reverse=True)
@@ -316,10 +341,23 @@ if uploaded_files and len(uploaded_files) == 5:
     
     # 2. CHAT INPUT
     if user_question := st.chat_input("Message the HR Assistant..."):
-        # Display user message immediately
+    
+        # Prompt Injection Check
+        if detect_prompt_injection(user_question):
+            response = "I can only answer questions based on the provided CVs."
+            st.chat_message("assistant").markdown(response)
+    
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response
+            })
+    
+            st.stop()
+    
+        # Display user message
         st.chat_message("user").markdown(user_question)
         st.session_state.messages.append({"role": "user", "content": user_question})
-
+    
         # Generate Response
         with st.chat_message("assistant"):
             with st.spinner(f"Running {rag_method}..."):
@@ -387,3 +425,4 @@ elif uploaded_files and len(uploaded_files) != 5:
     st.warning("Please adjust your upload to exactly 5 CVs to start the chat.")
 else:
     st.info("Please upload 5 CVs in the sidebar to begin.")
+
