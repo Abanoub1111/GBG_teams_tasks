@@ -110,3 +110,15 @@ def process_cvs(uploaded_files, strategy):
         collection_name="cv_collection_" + str(len(uploaded_files))
     )
     return vectorstore, all_chunks
+
+
+# ------------------- 3. RAG LOGIC (LCEL) -------------------
+def format_docs(docs):
+    formatted_chunks = []
+    for doc in docs:
+        source_name = doc.metadata.get('source', 'Unknown Candidate')
+        base_name = os.path.basename(source_name)
+        clean_name = base_name.replace(".pdf", "").replace("_", " ").replace("temp_", "")
+        formatted_chunks.append(f"CANDIDATE: {clean_name}\nCONTENT: {doc.page_content}")
+    return "\n\n---\n\n".join(formatted_chunks)
+
