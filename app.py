@@ -344,15 +344,17 @@ if uploaded_files and len(uploaded_files) == 5:
     
         # Prompt Injection Check
         if detect_prompt_injection(user_question):
+            # First, show the user message in chat
+            st.chat_message("user").markdown(user_question)
+            st.session_state.messages.append({"role": "user", "content": user_question})
+        
+            # Then show refusal response
             response = "I can only answer questions based on the provided CVs."
             st.chat_message("assistant").markdown(response)
-    
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": response
-            })
-    
-            st.stop()
+            st.session_state.messages.append({"role": "assistant", "content": response})
+        
+            # Skip the rest of the LLM pipeline
+            continue  # or just skip the rest of this iteration
     
         # Display user message
         st.chat_message("user").markdown(user_question)
@@ -425,4 +427,5 @@ elif uploaded_files and len(uploaded_files) != 5:
     st.warning("Please adjust your upload to exactly 5 CVs to start the chat.")
 else:
     st.info("Please upload 5 CVs in the sidebar to begin.")
+
 
