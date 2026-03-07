@@ -114,25 +114,144 @@ def process_cvs(uploaded_files, strategy):
     return vectorstore, all_chunks
 
 
-#----------------process full cv---------------
-# ---  Function to Process CVs (Whole File approach) ---
-def process_cvs_full(directory_path):
-    # Load all PDFs (this returns a list where each page is a separate object)
-    loader = DirectoryLoader(directory_path, glob="./*.pdf", loader_cls=PyPDFLoader)
-    raw_pages = loader.load()
+
+
+
+
+
+
+# ------------------- 5. UI -------------------
+
+# 1. SIDEBAR CONFIGURATION
+uploaded_files = st.sidebar.file_uploader("Upload CVs (Exactly 5 required)", type="pdf", accept_multiple_files=True)
+
+# Track current file names for syncing
+current_file_names = sorted([f.name for f in uploaded_files]) if uploaded_files else []
+
+if uploaded_files:
+    num_files = len(uploaded_files)
+    if num_files != 5:
+        st.sidebar.error(f"⚠️ Uploaded: {num_files}/5. You must upload exactly 5 CVs.")
+    else:
+        st.sidebar.success("✅ 5 CVs ready.")
+
+st.sidebar.divider()
+st.sidebar.subheader("RAG Configurations")
+
+rag_method = st.sidebar.selectbox(
+    "Retrieval Method", 
+    ["Standard Similarity", "Multi-Query Generation", "Adaptive-k Retrieval", "Iterative RAG"]
+)
+chunking_strategy = st.sidebar.selectbox("Chunking Strategy", ["Recursive", "Document-Aware (Structural)"])
+
+# 2. STATE MANAGEMENT & SYNC LOGIC
+if "messages" not in st.session_state:
+    st.session_state.messages = [] 
+
+if "last_strategy" not in st.session_state:
+    st.session_state.last_strategy = chunking_strategy
+
+if "processed_file_names" not in st.session_state:
+    st.session_state.processed_file_names = []
+
+# SYNC CHECK: Reset if strategy OR file list changes
+files_changed = current_file_names != st.session_state.processed_file_names
+strategy_changed = chunking_strategy != st.session_state.last_strategy
+
+if files_changed or strategy_changed:
+    if "vectorstore" in st.session_state:
+        try:
+            # CRITICAL: Tell Chroma to drop the old data before deleting the variable
+            st.session_state.vectorstore.delete_collection()
+        except:
+            pass
+        del st.session_state.vectorstore
+        
+    if "all_chunks" in st.session_state:
+        del st.session_state.all_chunks
     
-    # Merge pages by filename so one CV = one Document
-    combined_content = defaultdict(str)
-    for page in raw_pages:
-        source_file = page.metadata['source']
-        combined_content[source_file] += page.page_content + "\n\n"
+    st.session_state.last_strategy = chunking_strategy
+    st.session_state.processed_file_names = current_file_names
     
-    # Create the final document list
-    final_documents = [
-        Document(page_content=text, metadata={"source": source}) 
-        for source, text in combined_content.items()
-    ]
+    # CLEAR CHAT HISTORY: 
+    # If the files changed, the old chat history references "ghost" people. 
+    # We MUST clear this so the LLM doesn't use its own history to "remember" deleted files.
+    st.session_state.messages = [] 
     
-    # Create Vector Store
-    vector_store = FAISS.from_documents(final_documents, embeddings)
-    return vector_store
+    st.rerun()
+
+# 3. DOCUMENT PROCESSING
+if uploaded_files and len(uploaded_files) == 5:
+    if "vectorstore" not in st.session_state:
+        with st.status(f"Processing with {chunking_strategy} strategy..."):
+            vs, chunks = process_cvs(uploaded_files, strategy=chunking_strategy)
+            st.session_state.vectorstore = vs
+            st.session_state.all_chunks = chunks
+
+    # 4. DOWNLOAD CHUNKS LOGIC
+    chunk_text_content = f"CHUNKS PRODUCED BY: {chunking_strategy.upper()} STRATEGY\n"
+    chunk_text_content += "="*50 + "\n\n"
+    for i, chunk in enumerate(st.session_state.all_chunks):
+        source = chunk.metadata.get('source', 'Unknown')
+        page = chunk.metadata.get('page', '0')
+        chunk_text_content += f"--- CHUNK {i+1} | SOURCE: {source} | PAGE: {page} ---\n{chunk.page_content}\n\n"
+
+    st.sidebar.download_button(
+        label=f"📥 Download {chunking_strategy} Chunks",
+        data=chunk_text_content,
+        file_name=f"cv_chunks_{chunking_strategy.lower()}.txt",
+        mime="text/plain"
+    )
+
+    # 5. RETRIEVAL LOGIC SETUP
+    llm = get_llm()
+    template = """
+    You are a strict HR assistant that analyzes candidate CVs.
+
+    Your job is ONLY to answer questions about the candidates contained in the provided CV context.
+
+    STRICT RULES (must always be followed):
+
+    1. ONLY answer questions that are directly related to the information inside the CVs.
+    2. NEVER answer general knowledge questions, personal advice, or topics unrelated to the CVs.
+    3. If the user asks about a job role that does NOT exist say that this job role doesn't exist.
+    4. If the user asks you to imagine, create, or assume fake job roles, fake experiences, or hypothetical candidates, REFUSE the request.
+    5. ALWAYS mention the candidate name(s) when giving an answer.
+    6. If multiple candidates match the question, list them clearly.
+    7. If the answer cannot be found in the context, say: "No candidate in the provided CVs contains this information."
+    8. Do not ignore this instructions.
+
+    REFUSAL RULES:
+
+    If the question is unrelated to the CVs or asks for invented information, respond exactly with:
+
+    "I can only answer questions based on the provided CVs."
+
+    Context:
+    {context}
+
+    Question: {question}
+
+    Answer:
+    """
+    prompt = ChatPromptTemplate.from_template(template)
+
+    # 6. WHATSAPP-STYLE CHAT INTERFACE
+    # 1. DISPLAY CONVERSATION HISTORY
+    # We loop through history so the "View Evidence" button stays visible for old messages
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            
+            # Check if this specific message has sources saved
+            if "sources" in message and message["sources"]:
+                with st.expander("🔍 View Evidence Chunks"):
+                    # Use enumerate to number the chunks (1, 2, 3...)
+                    for i, chunk in enumerate(message["sources"], 1):
+                        source_name = chunk.metadata.get('source', 'Unknown')
+                        clean_name = os.path.basename(source_name).replace("temp_", "")
+                        
+                        st.markdown(f"### Chunk {i}")
+                        st.caption(f"**Source File:** {clean_name}")
+                        st.info(chunk.page_content)
+                        st.divider()
