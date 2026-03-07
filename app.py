@@ -67,3 +67,46 @@ def get_embeddings():
     )
 
 
+# ------------------- 2. VECTOR DB SETUP -------------------
+def process_cvs(uploaded_files, strategy):
+    all_chunks = []
+    
+    # 1. CLEANUP: If there is an existing vectorstore, we must delete its collection
+    if "vectorstore" in st.session_state and st.session_state.vectorstore is not None:
+        try:
+            # This deletes the data from the underlying Chroma client
+            st.session_state.vectorstore.delete_collection()
+        except:
+            pass # Handle cases where it's already gone
+
+    for uploaded_file in uploaded_files:
+        temp_path = f"./temp_{uploaded_file.name}"
+        with open(temp_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        
+        if strategy == "Document-Aware (Structural)":
+            loader = UnstructuredPDFLoader(
+                temp_path,
+                mode="elements",
+                strategy="fast",
+                chunking_strategy="by_title",
+                max_characters=1000,
+                combine_text_under_n_chars=500
+            )
+            all_chunks.extend(loader.load())
+        else:
+            loader = PyPDFLoader(temp_path)
+            docs = loader.load()
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=100)
+            all_chunks.extend(text_splitter.split_documents(docs))
+            
+        os.remove(temp_path)
+
+    #  2. CREATE FRESH: Always create a new collection name or clear the default
+    vectorstore = Chroma.from_documents(
+        documents=all_chunks, 
+        embedding=get_embeddings(),
+        # Force a unique collection name per "session set" to avoid merging
+        collection_name="cv_collection_" + str(len(uploaded_files))
+    )
+    return vectorstore, all_chunks
