@@ -16,6 +16,8 @@ from langchain_openai import AzureChatOpenAI
 from langchain_openai import AzureOpenAIEmbeddings
 import os
 from openai import AzureOpenAI
+from langchain_community.vectorstores import FAISS
+from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
 
 # client = AzureOpenAI(
 #     api_version="2024-12-01-preview",
