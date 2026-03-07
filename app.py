@@ -115,6 +115,63 @@ def process_cvs(uploaded_files, strategy):
 
 
 
+# ------------------- 3. RAG LOGIC (LCEL) -------------------
+def format_docs(docs):
+    formatted_chunks = []
+    for doc in docs:
+        source_name = doc.metadata.get('source', 'Unknown Candidate')
+        base_name = os.path.basename(source_name)
+        clean_name = base_name.replace(".pdf", "").replace("_", " ").replace("temp_", "")
+        formatted_chunks.append(f"CANDIDATE: {clean_name}\nCONTENT: {doc.page_content}")
+    return "\n\n---\n\n".join(formatted_chunks)
+
+# ------------------- 4. ADVANCED RETRIEVAL LOGIC -------------------
+
+def get_multi_query_retriever(retriever, llm):
+    return MultiQueryRetriever.from_llm(retriever=retriever, llm=llm)
+
+def get_unique_documents(documents):
+    """Removes duplicate chunks based on their page content."""
+    seen_contents = set()
+    unique_docs = []
+    for doc in documents:
+        if doc.page_content not in seen_contents:
+            unique_docs.append(doc)
+            seen_contents.add(doc.page_content)
+    return unique_docs
+
+def get_intersecting_documents(results_list):
+    if not results_list:
+        return []
+    
+    # Extract the text (content) from the first list of docs
+    common_content = set(doc.page_content for doc in results_list[0])
+    
+    # Keep only content that exists in every other list
+    for results in results_list[1:]:
+        current_content = set(doc.page_content for doc in results)
+        common_content &= current_content # This is the mathematical intersection
+        
+    # Convert that shared content back into actual Document objects
+    # (We grab the first version of the document we find)
+    final_docs = []
+    seen = set()
+    for sublist in results_list:
+        for doc in sublist:
+            if doc.page_content in common_content and doc.page_content not in seen:
+                final_docs.append(doc)
+                seen.add(doc.page_content)
+    return final_docs
+
+def adaptive_k_filter(docs_with_scores, min_k=1, max_k=10):
+    if not docs_with_scores: return []
+    docs_with_scores.sort(key=lambda x: x[1], reverse=True)
+    scores = [s for _, s in docs_with_scores]
+    gaps = [scores[i] - scores[i+1] for i in range(len(scores)-1)]
+    if not gaps: return [d for d, s in docs_with_scores[:min_k]]
+    max_gap_idx = gaps.index(max(gaps))
+    adaptive_k = max(min_k, min(max_gap_idx + 1, max_k))
+    return [d for d, s in docs_with_scores[:adaptive_k]]
 
 
 
@@ -255,3 +312,4 @@ if uploaded_files and len(uploaded_files) == 5:
                         st.caption(f"**Source File:** {clean_name}")
                         st.info(chunk.page_content)
                         st.divider()
+
