@@ -313,3 +313,77 @@ if uploaded_files and len(uploaded_files) == 5:
                         st.info(chunk.page_content)
                         st.divider()
 
+    
+    # 2. CHAT INPUT
+    if user_question := st.chat_input("Message the HR Assistant..."):
+        # Display user message immediately
+        st.chat_message("user").markdown(user_question)
+        st.session_state.messages.append({"role": "user", "content": user_question})
+
+        # Generate Response
+        with st.chat_message("assistant"):
+            with st.spinner(f"Running {rag_method}..."):
+                # --- Retrieval Logic ---
+                if rag_method == "Standard Similarity":
+                    # Increased k to 15
+                    source_chunks = st.session_state.vectorstore.similarity_search(user_question, k=15)
+                
+                # --- METHOD 2: MULTI-QUERY (FIXED) ---
+                elif rag_method == "Multi-Query Generation":
+                    base_retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 10})
+                    
+                    # 1. Ask the LLM to give us 3 versions of the question
+                    mq_prompt = f"Generate 3 different versions of this question to help retrieve documents: {user_question}. Provide only the questions, one per line."
+                    mq_response = llm.invoke(mq_prompt)
+                    
+                    # Extract the lines (supporting both string and message objects)
+                    raw_text = mq_response.content if hasattr(mq_response, 'content') else str(mq_response)
+                    queries = [q.strip() for q in raw_text.strip().split('\n') if q.strip()][:3]
+                    
+                    # 2. Get results for each query separately (to keep 3 separate lists)
+                    results_per_query = []
+                    for q in queries:
+                        results_per_query.append(base_retriever.invoke(q))
+                    
+                    # 3. INTERSECT (The part you wanted!)
+                    source_chunks = get_intersecting_documents(results_per_query)
+                    
+                    # Safety check: if intersection is empty, give a warning
+                    if not source_chunks:
+                        st.warning("No chunks were found in ALL 3 searches. The intersection is empty.")
+
+                elif rag_method == "Adaptive-k Retrieval":
+                    docs_and_scores = st.session_state.vectorstore.similarity_search_with_relevance_scores(user_question, k=15)
+                    adaptive_docs = adaptive_k_filter(docs_and_scores)
+                    source_chunks = get_unique_documents(adaptive_docs)
+
+                elif rag_method == "Iterative RAG":
+                    base_retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 10})
+                    source_chunks = base_retriever.invoke(user_question)
+                    test_chain = (prompt | llm | StrOutputParser())
+                    initial_check = test_chain.invoke({"context": format_docs(source_chunks), "question": user_question})
+                    
+                    if "don't know" in initial_check.lower() or "not mentioned" in initial_check.lower():
+                        st.info("🔄 Expanding search for better context...")
+                        broader_retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 10})
+                        source_chunks = broader_retriever.invoke(user_question)
+
+                final_chain = (
+                    {"context": lambda x: format_docs(source_chunks), "question": RunnablePassthrough()}
+                    | prompt | llm | StrOutputParser()
+                )
+                response = final_chain.invoke(user_question)
+                st.markdown(response)
+                
+                st.session_state.messages.append({
+                    "role": "assistant", 
+                    "content": response, 
+                    "sources": source_chunks
+                })
+                # Rerun to make sure the evidence expander appears immediately
+                st.rerun()
+
+elif uploaded_files and len(uploaded_files) != 5:
+    st.warning("Please adjust your upload to exactly 5 CVs to start the chat.")
+else:
+    st.info("Please upload 5 CVs in the sidebar to begin.")
