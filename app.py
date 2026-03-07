@@ -16,6 +16,8 @@ from langchain_openai import AzureChatOpenAI
 from langchain_openai import AzureOpenAIEmbeddings
 import os
 from openai import AzureOpenAI
+from langchain_community.vectorstores import FAISS
+from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
 
 # client = AzureOpenAI(
 #     api_version="2024-12-01-preview",
@@ -110,3 +112,27 @@ def process_cvs(uploaded_files, strategy):
         collection_name="cv_collection_" + str(len(uploaded_files))
     )
     return vectorstore, all_chunks
+
+
+#----------------process full cv---------------
+# ---  Function to Process CVs (Whole File approach) ---
+def process_cvs_full(directory_path):
+    # Load all PDFs (this returns a list where each page is a separate object)
+    loader = DirectoryLoader(directory_path, glob="./*.pdf", loader_cls=PyPDFLoader)
+    raw_pages = loader.load()
+    
+    # Merge pages by filename so one CV = one Document
+    combined_content = defaultdict(str)
+    for page in raw_pages:
+        source_file = page.metadata['source']
+        combined_content[source_file] += page.page_content + "\n\n"
+    
+    # Create the final document list
+    final_documents = [
+        Document(page_content=text, metadata={"source": source}) 
+        for source, text in combined_content.items()
+    ]
+    
+    # Create Vector Store
+    vector_store = FAISS.from_documents(final_documents, embeddings)
+    return vector_store
