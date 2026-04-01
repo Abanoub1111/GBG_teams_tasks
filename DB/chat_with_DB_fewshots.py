@@ -11,9 +11,9 @@ from dotenv import load_dotenv
 # LangChain Imports
 from langchain_core.prompts import PromptTemplate
 from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.documents import Document
 from langchain_openai import AzureChatOpenAI
+from langchain_openai import AzureOpenAIEmbeddings
 
 load_dotenv()
 
@@ -41,7 +41,7 @@ def get_retriever():
         ) for ex in few_shots
     ]
 
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    embeddings = get_embeddings()
     vectorstore = FAISS.from_documents(docs, embeddings)
     return vectorstore.as_retriever(search_kwargs={"k": 3})
 
@@ -93,11 +93,14 @@ def get_schema() -> str:
 @st.cache_resource
 def get_llm():
     return AzureChatOpenAI(
-        azure_endpoint="https://gbgacademy-genai.openai.azure.com/",
-        api_key=os.getenv("openai_api"),
-        api_version="2024-12-01-preview",
-        deployment_name="gpt-4.1",
+        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
         temperature=0
+    )
+    
+@st.cache_resource
+def get_embeddings():
+    return AzureOpenAIEmbeddings(
+        model=os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
     )
 
 
@@ -156,6 +159,7 @@ User Question:
 {question}
 
 Write a single PostgreSQL query that answers the question.
+Use double quotes around table and column names.
 Return ONLY the SQL. No markdown, no explanation.
 """)
     return sql_prompt | llm
