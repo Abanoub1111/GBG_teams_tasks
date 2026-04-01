@@ -23,6 +23,7 @@ load_dotenv()
 DB_URL            = "postgresql://postgres:msFFfEoZeTdyGPmEVddUOOhmdEIUHIAd@gondola.proxy.rlwy.net:55236/railway"
 NUM_VARIANTS      = 3   # how many variants to generate per question
 MAX_HEAL_ATTEMPTS = 3   # max self-healing retries on the final chosen result
+MAX_QUERY_RESULT_ROWS = 15  # max rows to include in the LLM prompt for answering
 
 st.set_page_config(page_title="SQL Chatbot", page_icon=":bar_chart:", layout="wide")
 st.title("Chat with Postgres DB :bar_chart:")
@@ -225,6 +226,7 @@ SQL Result:
 {sql_result}
 
 Answer the question strictly based on the SQL result.
+If the data has ('Results length in DB: x. Only y selected') tell the user how many exists in DB and how many is shown for demonstration.
 If the result is empty, say:
 "The data does not provide a clear answer to the question."
 """)
@@ -366,6 +368,14 @@ def self_heal_final(
         current_sql = healed_sql
 
     return current_sql, pd.DataFrame(), False  # all attempts exhausted
+
+def limit_results(df, limit):
+    df_len = len(df)
+    exceed = ""
+    if df_len > limit:
+        df = df[:limit]
+        exceed = f"Results length in DB: {df_len}. Only {limit} Selected"
+    return f"{exceed}\n{df.to_string(index=False)}"
 
 
 # ------------------- STREAMLIT APP -------------------
@@ -546,9 +556,10 @@ if __name__ == "__main__":
             if user_question in st.session_state.answer_cache:
                 final_answer = st.session_state.answer_cache[user_question]
             else:
+                final_result = limit_results(final_df, limit=MAX_QUERY_RESULT_ROWS)
                 final_answer_response = answer_chain.invoke({
                     "question": user_question,
-                    "sql_result": final_df.to_string(),
+                    "sql_result": final_result,
                 })
                 final_answer = final_answer_response.content
                 st.session_state.answer_cache[user_question] = final_answer
