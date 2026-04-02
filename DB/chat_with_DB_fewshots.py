@@ -28,6 +28,24 @@ MAX_QUERY_RESULT_ROWS = 15  # max rows to include in the LLM prompt for answerin
 st.set_page_config(page_title="SQL Chatbot", page_icon=":bar_chart:", layout="wide")
 st.title("Chat with Postgres DB :bar_chart:")
 
+# --- SESSION STATE INITIALIZATION ---
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "sql_cache" not in st.session_state:
+    st.session_state.sql_cache = {}
+if "answer_cache" not in st.session_state:
+    st.session_state.answer_cache = {}
+
+# Display chat messages from history on app rerun
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+        if "sql" in message:
+            with st.expander("View SQL"):
+                st.code(message["sql"], language="sql")
+        if "df" in message:
+            st.dataframe(message["df"])
+
 # ------------------- RAG / FEW-SHOT SETUP -------------------
 
 @st.cache_resource
@@ -133,15 +151,17 @@ def get_embeddings():
 
 @st.cache_resource
 def get_question_variant_chain(llm):
-    """Generates N different ways to ask the same question."""
     prompt = PromptTemplate.from_template("""
-You are a linguistic expert. Given a user's natural language question, generate exactly {num_variants} semantically equivalent but differently phrased versions.
-Focus on varying the terminology (e.g., "total sales" vs "sum of revenue") and structure.
+You are a linguistic expert. Given the following conversation history and a new user question, 
+rephrase the new question to be a standalone question that captures the full context.
+Then, generate {num_variants} semantically equivalent versions of that standalone question.
 
-User Question: {question}
+Chat History:
+{chat_history}
 
-Return ONLY the variants, separated by the delimiter: ---VARIANT---
-No numbering, no explanation.
+New User Question: {question}
+
+Return ONLY the variants, separated by ---VARIANT---.
 """)
     return prompt | llm
 
@@ -381,189 +401,109 @@ def limit_results(df, limit):
 # ------------------- STREAMLIT APP -------------------
 
 if __name__ == "__main__":
-    schema        = get_schema()
-    llm           = get_llm()
-    #variant_chain = get_variant_chain(llm)
+    schema = get_schema()
+    llm = get_llm()
     question_variant_chain = get_question_variant_chain(llm)
     sql_generation_chain = get_single_sql_chain(llm)
-    judge_chain   = get_judge_chain(llm)
-    heal_chain    = get_heal_chain(llm)
-    answer_chain  = get_answer_chain(llm)
+    judge_chain = get_judge_chain(llm)
+    heal_chain = get_heal_chain(llm)
+    answer_chain = get_answer_chain(llm)
 
-    # --- SESSION STATE ---
-    if "sql_cache" not in st.session_state:
-        st.session_state.sql_cache = {}
-    if "answer_cache" not in st.session_state:
-        st.session_state.answer_cache = {}
 
-    user_question = st.text_input("Ask a question about the database:")
 
-    if st.button("Get Answer") and user_question:
+    # --- INPUT HANDLING ---
+    # We use chat_input as the single source of truth for the question
+    user_question = st.chat_input("Ask a question about the database:")
 
+    if user_question:
+        # 1. Display user message immediately
+        with st.chat_message("user"):
+            st.markdown(user_question)
+        
+        # 2. Add user message to history
+        st.session_state.messages.append({"role": "user", "content": user_question})
+
+        # 3. Check Cache or Run Logic
         if user_question in st.session_state.sql_cache:
             final_sql, final_df, selection_method = st.session_state.sql_cache[user_question]
-
         else:
-            # few_shot_examples = get_few_shot_context(user_question)
-
-            # with st.status("🧠 Processing your question…", expanded=True) as status:
-
-                # # ============================================================
-                # # STEP 1 — Generate N SQL variants
-                # # ============================================================
-                # variant_response = variant_chain.invoke({
-                #     "schema": schema,
-                #     "question": user_question,
-                #     "few_shot_examples": few_shot_examples,
-                #     "num_variants": NUM_VARIANTS,
-                # })
-
-                # raw_variants = variant_response.content.split("---VARIANT---")
-                # sql_variants = [clean_sql(v) for v in raw_variants if clean_sql(v)]
-                # sql_variants = [
-                #     v for v in sql_variants if v.lower().startswith("select")
-                # ][:NUM_VARIANTS]
-
-                # if not sql_variants:
-                #     st.error("No valid SELECT variants were generated.")
-                #     st.stop()
-
-                # st.write(f"✅ Generated {len(sql_variants)} SQL variant(s)")
-
-                # # ============================================================
-                # # STEP 2 — Execute all variants (no self-healing here)
-                # # ============================================================
-                # results = []
-                # for idx, sql in enumerate(sql_variants, 1):
-                #     st.write(f"⚙️ Executing variant {idx}…")
-                #     df, error = execute_sql(sql)
-                #     if error:
-                #         st.warning(f"Variant {idx} failed to execute: {error}")
-                #     results.append({
-                #         "idx": idx,
-                #         "sql": sql,
-                #         "df": df,
-                #         "fingerprint": df_fingerprint(df),
-                #         "error": error,
-                #     })
-
-                # # ============================================================
-                # # STEP 3 — Consensus selection on FULL results
-                # # ============================================================
-                # st.write("🔍 Comparing full results across all variants…")
-                # chosen, selection_method = select_consensus(results, user_question, judge_chain)
-
-
-            with st.status("🧠 Processing your question…", expanded=True) as status:
+            with st.status("🧠 Processing your question...", expanded=True) as status:
+                # --- STEP 1: History & Rephrasing ---
+                history_str = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.messages[-6:-1]])
                 
-                # ============================================================
-                # STEP 1 — Generate N Question variants
-                # ============================================================
-                st.write("🔄 Rephrasing your question...")
+                st.write("🔄 Rephrasing with context...")
                 q_variant_resp = question_variant_chain.invoke({
+                    "chat_history": history_str,
                     "question": user_question,
                     "num_variants": NUM_VARIANTS
                 })
                 
-                # Split and clean the questions
                 questions = [q.strip() for q in q_variant_resp.content.split("---VARIANT---") if q.strip()]
-                # Ensure we have the original + variants up to our limit
                 all_questions = ([user_question] + questions)[:NUM_VARIANTS]
 
-                # ============================================================
-                # STEP 2 — Generate 1 SQL per question variant
-                # ============================================================
+                # --- STEP 2: SQL Generation ---
                 results = []
                 for idx, q_var in enumerate(all_questions, 1):
-                    st.write(f"⚙️ Processing variant {idx}: '{q_var[:50]}...'")
-                    
-                    # Get specific few-shots for THIS variation
+                    st.write(f"⚙️ Variant {idx}: '{q_var[:50]}...'")
                     few_shot_examples = get_few_shot_context(q_var)
-                    
                     sql_resp = sql_generation_chain.invoke({
                         "schema": schema,
                         "question": q_var,
                         "few_shot_examples": few_shot_examples
                     })
-                    
                     sql = clean_sql(sql_resp.content)
-                    
-                    # Execute immediately
                     df, error = execute_sql(sql)
-                    
-                    if error:
-                        st.warning(f"Variant {idx} failed: {error}")
-                    
                     results.append({
                         "idx": idx,
-                        "question_variant": q_var,
                         "sql": sql,
                         "df": df,
                         "fingerprint": df_fingerprint(df),
                         "error": error,
                     })
 
-                # ============================================================
-                # STEP 3 — Consensus selection (Rest of your code remains the same!)
-                # ============================================================
-                st.write("🔍 Comparing results across variants…")
+                # --- STEP 3: Consensus ---
+                st.write("🔍 Selecting best result...")
                 chosen, selection_method = select_consensus(results, user_question, judge_chain)
-                st.write(f"✅ Selected via: {selection_method}")
-
                 final_sql = chosen["sql"]
-                final_df  = chosen["df"]
+                final_df = chosen["df"]
 
-                # ============================================================
-                # STEP 4 — Self-healing on the FINAL chosen result only
-                # ============================================================
-                needs_healing = chosen["error"] is not None or final_df.empty
-
-                if needs_healing:
-                    st.write("🔧 Chosen result is empty or errored — running self-heal…")
-                    issue = chosen["error"] or "The selected query returned no results."
+                # --- STEP 4: Self-Healing ---
+                if chosen["error"] or final_df.empty:
+                    st.write("🔧 Running self-heal...")
+                    issue = chosen["error"] or "Empty results."
                     final_sql, final_df, healed = self_heal_final(
                         final_sql, issue, user_question, schema, heal_chain
                     )
-                    if healed:
-                        st.write("✅ Self-healing succeeded")
-                        selection_method += " → self-healed ✓"
-                    else:
-                        st.warning("⚠️ Self-healing exhausted all attempts.")
-                        selection_method += " → self-heal failed"
+                    selection_method += " (Healed)" if healed else " (Heal Failed)"
 
-                status.update(
-                    label=f"Done — {selection_method}",
-                    state="complete"
-                )
+                status.update(label=f"Done — {selection_method}", state="complete")
 
-            # Cache for re-use
+            # Store in cache
             st.session_state.sql_cache[user_question] = (final_sql, final_df, selection_method)
 
-        # ====================================================================
-        # STEP 5 — Display final SQL & result
-        # ====================================================================
-        st.subheader("Final SQL Query")
-        st.caption(f"Selection: {selection_method}")
-        st.code(final_sql, language="sql")
-
-        st.subheader("Query Result")
-        st.dataframe(final_df)
-
-        # ====================================================================
-        # STEP 6 — Natural-language answer
-        # ====================================================================
+        # --- STEP 5 & 6: Final Answer & Display ---
         if not final_df.empty:
             if user_question in st.session_state.answer_cache:
                 final_answer = st.session_state.answer_cache[user_question]
             else:
                 final_result = limit_results(final_df, limit=MAX_QUERY_RESULT_ROWS)
-                final_answer_response = answer_chain.invoke({
-                    "question": user_question,
-                    "sql_result": final_result,
-                })
-                final_answer = final_answer_response.content
+                ans_resp = answer_chain.invoke({"question": user_question, "sql_result": final_result})
+                final_answer = ans_resp.content
                 st.session_state.answer_cache[user_question] = final_answer
-
-            st.markdown(f"**Answer:** {final_answer}")
         else:
-            st.markdown("**Answer:** The data does not provide a clear answer to the question.")
+            final_answer = "The data does not provide a clear answer."
+
+        # Display Assistant message
+        with st.chat_message("assistant"):
+            st.markdown(final_answer)
+            st.dataframe(final_df)
+            with st.expander("View SQL"):
+                st.code(final_sql, language="sql")
+
+        # Save to history
+        st.session_state.messages.append({
+            "role": "assistant", 
+            "content": final_answer,
+            "sql": final_sql,
+            "df": final_df
+        })
