@@ -2,6 +2,7 @@ import streamlit as st
 from dotenv import load_dotenv
 import os
 import pandas as pd
+import json
 
 from azure.ai.documentintelligence import (
     DocumentIntelligenceClient,
@@ -11,7 +12,6 @@ from azure.core.credentials import AzureKeyCredential
 from azure.storage.blob import BlobServiceClient
 import uuid
 from datetime import datetime, timedelta
-
 from azure.storage.blob import generate_container_sas, ContainerSasPermissions
 
 # ===================== LOAD ENV =====================
@@ -31,12 +31,10 @@ client = DocumentIntelligenceClient(endpoint, AzureKeyCredential(key))
 admin_client = DocumentIntelligenceAdministrationClient(endpoint, AzureKeyCredential(key))
 blob_service_client = BlobServiceClient.from_connection_string(conn_str)
 
-# 👇 مهم جدًا (بدون SAS)
 account_name = blob_service_client.account_name
 container_url = f"https://{account_name}.blob.core.windows.net/{container_name}"
 
-
-# Create the SAS token
+# ===================== SAS TOKEN =====================
 sas_token = generate_container_sas(
     account_name=blob_service_client.account_name,
     container_name=container_name,
@@ -45,13 +43,34 @@ sas_token = generate_container_sas(
     expiry=datetime.utcnow() + timedelta(hours=1)
 )
 
-# 🔥 Now include the token in the URL
-container_url_with_sas = f"https://{account_name}.blob.core.windows.net/{container_name}?{sas_token}"
-
 full_auth_url = f"{container_url}?{sas_token}"
+
+# ===================== HELPER =====================
+def convert_to_azure_format(labeled_data):
+    fields = {}
+
+    for item in labeled_data:
+        label = item["label"]
+        text = item["text"]
+
+        if label not in fields:
+            fields[label] = {"content": text}
+        else:
+            fields[label]["content"] += f" {text}"
+
+    return {
+        "documents": [
+            {
+                "fields": fields
+            }
+        ]
+    }
 
 # ===================== UI =====================
 st.title("📄 Document Intelligence App")
+
+if "model_id" in st.session_state:
+    st.info(f"Using Model ID: {st.session_state['model_id']}")
 
 option = st.selectbox(
     "Choose processing type",
@@ -82,13 +101,84 @@ if option != "Custom Model":
 
             result = poller.result()
 
-            data = []
+            lines = []
             for page in result.pages:
                 for line in page.lines:
-                    data.append({"Text": line.content})
+                    lines.append(line.content)
 
-            df = pd.DataFrame(data)
+            st.success("Document processed ✅")
 
+            # ===== LABELING =====
+            st.subheader("📝 Label the extracted text")
+
+            label_options = [
+                "None",
+                "invoice_id",
+                "total_amount",
+                "invoice_date",
+                "vendor_name",
+                "other"
+            ]
+
+            labeled_data = []
+
+            for i, line in enumerate(lines):
+                col1, col2 = st.columns([3, 2])
+
+                with col1:
+                    st.write(line)
+
+                with col2:
+                    label = st.selectbox(
+                        "Label",
+                        label_options,
+                        key=f"label_{i}"
+                    )
+
+                    if label != "None":
+                        labeled_data.append({
+                            "text": line,
+                            "label": label
+                        })
+
+            # ===== SAVE + UPLOAD =====
+            if st.button("💾 Save & Upload Labels"):
+
+                if labeled_data:
+
+                    azure_format = convert_to_azure_format(labeled_data)
+                    json_filename = f"{uploaded_file.name}.labels.json"
+
+                    with open(json_filename, "w") as f:
+                        json.dump(azure_format, f, indent=2)
+
+                    container_client = blob_service_client.get_container_client(container_name)
+
+                    try:
+                        container_client.create_container()
+                    except:
+                        pass
+
+                    uploaded_file.seek(0)
+                    container_client.upload_blob(
+                        name=f"training/{uploaded_file.name}",
+                        data=uploaded_file.read(),
+                        overwrite=True
+                    )
+
+                    container_client.upload_blob(
+                        name=f"training/{json_filename}",
+                        data=json.dumps(azure_format),
+                        overwrite=True
+                    )
+
+                    st.success("File + Labels uploaded ✅")
+                    st.json(azure_format)
+
+                else:
+                    st.warning("No labels selected")
+
+            # ===== DISPLAY =====
             col1, col2 = st.columns(2)
 
             with col1:
@@ -96,82 +186,95 @@ if option != "Custom Model":
                 st.json(result.as_dict())
 
             with col2:
-                st.subheader("📊 Structured Table")
+                df = pd.DataFrame({"Text": lines})
+                st.subheader("📊 Extracted Text")
                 st.dataframe(df)
 
 # ===================== CUSTOM MODEL =====================
 if option == "Custom Model":
 
-    uploaded_files = st.file_uploader(
-        "Upload at least 5 documents",
-        #type=["pdf", "png", "jpg"],
-        accept_multiple_files=True
-    )
+    mode = st.radio("Mode", ["Train Model", "Test Model"])
 
-    if uploaded_files:
+    # ================= TRAIN =================
+    if mode == "Train Model":
 
-        if len(uploaded_files) < 5:
-            st.warning(f"Uploaded {len(uploaded_files)} files. Need at least 5.")
-        else:
-            st.success("Ready to train 🚀")
+        uploaded_files = st.file_uploader(
+            "Upload at least 5 documents",
+            accept_multiple_files=True,
+            key="train_upload"
+        )
 
-            if st.button("🔥 Train Model"):
+        if uploaded_files:
 
-                container_client = blob_service_client.get_container_client(container_name)
+            if len(uploaded_files) < 5:
+                st.warning(f"Uploaded {len(uploaded_files)} files. Need at least 5.")
+            else:
+                st.success("Ready to train 🚀")
 
-                # create container if not exists
-                try:
-                    container_client.create_container()
-                except:
-                    pass
+                if st.button("🔥 Train Model"):
 
-                # ================= Upload =================
-                for file in uploaded_files:
-                    file.seek(0)
-                    container_client.upload_blob(
-                        name=f"training/{file.name}",
-                        data=file.read(),
-                        overwrite=True
-                    )
+                    container_client = blob_service_client.get_container_client(container_name)
 
-                st.success("Files uploaded to Blob Storage ✅")
+                    try:
+                        container_client.create_container()
+                    except:
+                        pass
 
-                # ================= Train =================
-                model_id = f"model-{uuid.uuid4()}"
-
-                with st.spinner("Training model..."):
-
-                    poller = admin_client.begin_build_document_model(
-                        body={
-                            "modelId": model_id,
-                            "buildMode": "neural",
-                            "azureBlobSource": {
-                                "containerUrl": full_auth_url, # ✅ Now has access
-                                "prefix": "training/"          # ✅ Matches upload path
-                            }
-                        },
-                        polling_interval=15
-                    )
-
-                    # Tell the poller to wait 10 seconds between checks instead of the default
-                    model = poller.result()
-
-                st.success("Model trained successfully 🎉")
-                st.write("Model ID:", model.model_id)
-
-                # ================= TEST =================
-                test_file = st.file_uploader("Upload file to test model", type=["pdf", "png", "jpg"])
-
-                if test_file:
-
-                    with st.spinner("Analyzing..."):
-
-                        poller = client.begin_analyze_document(
-                            model.model_id,
-                            test_file.read()
+                    for file in uploaded_files:
+                        file.seek(0)
+                        container_client.upload_blob(
+                            name=f"training/{file.name}",
+                            data=file.read(),
+                            overwrite=True
                         )
 
-                        result = poller.result()
+                    st.success("Files uploaded ✅")
 
-                        st.subheader("📦 Raw JSON")
-                        st.json(result.as_dict())
+                    model_id = f"model-{uuid.uuid4()}"
+
+                    with st.spinner("Training model..."):
+
+                        poller = admin_client.begin_build_document_model(
+                            body={
+                                "modelId": model_id,
+                                "buildMode": "template",
+                                "azureBlobSource": {
+                                    "containerUrl": full_auth_url,
+                                    "prefix": "training/"
+                                }
+                            },
+                            polling_interval=15
+                        )
+
+                        model = poller.result()
+
+                    st.session_state["model_id"] = model.model_id
+                    st.success(f"Model trained 🎉 ID: {model.model_id}")
+
+    # ================= TEST =================
+    if mode == "Test Model":
+
+        if "model_id" not in st.session_state:
+            st.warning("⚠️ Train a model first")
+        else:
+            st.success(f"Using Model: {st.session_state['model_id']}")
+
+            test_file = st.file_uploader(
+                "Upload file to test model",
+                type=["pdf", "png", "jpg"],
+                key="test_upload"
+            )
+
+            if test_file and st.button("🔍 Run Inference"):
+
+                with st.spinner("Analyzing..."):
+
+                    poller = client.begin_analyze_document(
+                        st.session_state["model_id"],
+                        test_file.read()
+                    )
+
+                    result = poller.result()
+
+                    st.subheader("📦 Raw JSON")
+                    st.json(result.as_dict())
