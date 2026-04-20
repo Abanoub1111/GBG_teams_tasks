@@ -57,14 +57,44 @@ def get_image_base64(img):
     img_str = base64.b64encode(buffered.getvalue()).decode()
     return f"data:image/png;base64,{img_str}"
 
-def safe_analyze(model_id, document_data):
+
+def safe_analyze(model_id, document_data, file_name="unknown"):
     try:
         poller = client.begin_analyze_document(model_id, document_data, polling_interval=10)
         time.sleep(5) 
-        return poller.result()
+        result = poller.result()
+        
+        # --- TRACK USAGE ---
+        log_usage(model_id, file_name, "Success")
+        # -------------------
+        
+        return result
     except Exception as e:
+        log_usage(model_id, file_name, f"Error: {str(e)[:50]}")
         st.error(f"Azure Error: {e}")
         return None
+
+
+# ===================== USAGE TRACKING =====================
+def log_usage(model_id, document_name, status="Success"):
+    """Tracks model calls in st.session_state and a local CSV"""
+    usage_entry = {
+        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Model ID": model_id,
+        "Document": document_name,
+        "Status": status
+    }
+    
+    # 1. Track in Session State (for this view)
+    if "usage_history" not in st.session_state:
+        st.session_state.usage_history = []
+    st.session_state.usage_history.append(usage_entry)
+    
+    # 2. Track to CSV (Permanent local log)
+    log_file = "model_usage_log.csv"
+    df = pd.DataFrame([usage_entry])
+    df.to_csv(log_file, mode='a', index=False, header=not os.path.exists(log_file))
+
 
 # ===================== UI SETUP =====================
 st.set_page_config(layout="wide", page_title="Azure Doc AI")
@@ -229,7 +259,6 @@ if option == "Custom Model":
                     st.rerun()
 
     # --- Training Section ---
-    # --- Training Section ---
         st.divider()
         if st.button("🚀 Train Model"):
             if len(st.session_state.annotations) < 5:
@@ -324,3 +353,29 @@ if option == "Custom Model":
                 else:
                     st.error("No fields were extracted. Check if the model is still 'Running' in Azure Studio.")
         # =========================================================================
+
+# ===================== USAGE DASHBOARD (LANGVIEWS) =====================
+st.sidebar.divider()
+if st.sidebar.checkbox("📊 Show Usage Analytics"):
+    st.header("📈 Model Usage Analytics (LangViews)")
+    
+    if os.path.exists("model_usage_log.csv"):
+        usage_df = pd.read_csv("model_usage_log.csv")
+        
+        # Display Metrics
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total Calls", len(usage_df))
+        m2.metric("Unique Models", usage_df["Model ID"].nunique())
+        m3.metric("Success Rate", f"{(usage_df['Status'] == 'Success').mean()*100:.1f}%")
+        
+        # # Usage Chart
+        # st.subheader("Calls Over Time")
+        # usage_df['Timestamp'] = pd.to_datetime(usage_df['Timestamp'])
+        # chart_data = usage_df.resample('H', on='Timestamp').count()["Model ID"]
+        # st.line_chart(chart_data)
+        
+        # Raw Data
+        with st.expander("View Detailed Logs"):
+            st.dataframe(usage_df.sort_values(by="Timestamp", ascending=False), use_container_width=True)
+    else:
+        st.info("No usage data recorded yet. Run an analysis to start tracking.")
