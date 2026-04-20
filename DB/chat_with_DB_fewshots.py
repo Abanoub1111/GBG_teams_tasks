@@ -179,9 +179,12 @@ Database schema:
 User Question:
 {question}
 
-Write a single PostgreSQL query that answers the question.
-Use double quotes around table and column names.
-Return ONLY the SQL. No markdown, no explanation.
+--- SECURITY CONSTRAINTS ---
+- You are STRICTLY PROHIBITED from using any DML or DDL commands. 
+- Only write "SELECT" statements to retrieve data.
+- Never use: INSERT, UPDATE, DELETE, DROP, TRUNCATE, ALTER, or GRANT.
+- Use double quotes around table and column names.
+- Return ONLY the SQL. No markdown, no explanation.
 """)
     return sql_prompt | llm
 
@@ -212,7 +215,6 @@ No explanation, no extra text.
 def get_heal_chain(llm):
     """
     Self-healing applied ONLY to the final chosen SQL.
-    Receives the current SQL + a description of the issue and returns a fixed query.
     """
     heal_prompt = PromptTemplate.from_template("""
 You are an expert PostgreSQL data analyst fixing or improving a SQL query.
@@ -229,7 +231,10 @@ Issue with the current query:
 Current SQL:
 {current_sql}
 
-Write ONLY a corrected/improved SQL query that properly answers the question.
+--- SECURITY CONSTRAINTS ---
+- You are STRICTLY PROHIBITED from using any commands other than SELECT.
+- Do NOT attempt to fix errors by using UPDATE, DELETE, or DROP.
+- If the question cannot be answered with a SELECT statement, simply return a query that selects an empty string or NULL.
 - Use double quotes around table and column names.
 - Return only valid SELECT SQL — no explanation, no markdown.
 """)
