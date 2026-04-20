@@ -354,10 +354,10 @@ if option == "Custom Model":
                     st.error("No fields were extracted. Check if the model is still 'Running' in Azure Studio.")
         # =========================================================================
 
-# ===================== USAGE DASHBOARD (LANGVIEWS) =====================
+# ===================== USAGE DASHBOARD =====================
 st.sidebar.divider()
 if st.sidebar.checkbox("📊 Show Usage Analytics"):
-    st.header("📈 Model Usage Analytics (LangViews)")
+    st.header("📈 Model Usage Analytics")
     
     if os.path.exists("model_usage_log.csv"):
         usage_df = pd.read_csv("model_usage_log.csv")
